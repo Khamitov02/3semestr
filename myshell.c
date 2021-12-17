@@ -1,164 +1,93 @@
-#include <unistd.h>
-#include <stdio.h>
-#include <string.h>
 #include <ctype.h>
-#include <stdbool.h>
-#include <signal.h>
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/time.h>
 #include <sys/wait.h>
-#include "../console_colors.h"
+#include <unistd.h>
+#define INWORD 1
+#define OUTWORD 0
+#define max_symb 1000
+#define CLOSE(fd1)              \
+    if (close (fd1) < 0) {      \
+        perror ("Error close"); \
+        return errno;           \
+    }
 
-#define FREQUENT_FEATURES_SINGLE_FILE
-#include "../frequent_features.h"
-
-#define MAX_TOKEN 256 // max argument length
-#define MAX_ARGS 1000 // max arguments in one command
-
-#define BASH_NAME "mybash"
-#define GREEN(text) CONSOLE_BOLD(CONSOLE_GREEN(text))
-#define PURPLE(text) CONSOLE_BOLD(CONSOLE_PURPLE(text))
-const char *greeting_msg = GREEN("***** Welcome to ") PURPLE(BASH_NAME) GREEN(" !!! *****");
-const char *leaving_msg = GREEN("***** Thanks for using ") PURPLE(BASH_NAME) GREEN(" !!! *****");
-const char *error_prompt = PURPLE("-" BASH_NAME);
-const char *prompt = PURPLE(BASH_NAME "$ ");
-const char *short_prompt = PURPLE("> ");
-
-typedef enum {
-	TOK_UNKNOWN, TOK_TOO_LONG_ARG, TOK_EOF, TOK_ARG, TOK_PIPE, TOK_NEWLINE
-} token_type_t;
-
-struct {
-	token_type_t type;
-	char name[MAX_TOKEN + 1]; // +1 - for '\0'		
-} current_token;
-
-token_type_t _get_token(char *buf, size_t maxbuf)
+int main ()
 {
-	size_t buf_sz = 0;
-	token_type_t type = TOK_UNKNOWN;
-	
-	int c = 0;
-	while (isspace(c = getchar()) && c != '\n') // skip spaces
-		;
-	while (buf_sz < maxbuf - 1 && c != EOF && c != '|' && !isspace(c) ) {
-		buf[buf_sz++] = c;
-		c = getchar();
-	}
-	if (buf_sz == 0) {
-		if (c == '|')
-			return TOK_PIPE;
-		if (c == '\n')
-			return TOK_NEWLINE;
-		else if (c == EOF)
-			return TOK_EOF;
-		else
-			return TOK_UNKNOWN;
-	}
-	ungetc(c, stdin);
-	buf[buf_sz++] = '\0';
-	return (buf_sz == maxbuf && !isspace(c)) ? TOK_TOO_LONG_ARG : TOK_ARG;
-}
+    char command_name[max_symb];
+    char *commands[max_symb];
+    char *cmd[max_symb];
 
-token_type_t get_token()
-{
-	return (current_token.type = _get_token(current_token.name, MAX_TOKEN + 1)); // +1 - for '\0';
-}
+    while (!feof (stdin)) {
+        printf ("my_shell > ");
 
-void skip_empty_inputs()
-{
-	do {
-		printf("%s", prompt);
-	} while (get_token() == TOK_NEWLINE);	
-}
+        fgets (command_name, max_symb, stdin); //читаем символы
 
-void skip_empty_inputs_short()
-{
-	do {
-		printf("%s", short_prompt);
-	} while (get_token() == TOK_NEWLINE);	
-}
+        command_name[strlen (command_name) - 1] = 0;
 
-/* returns 0 if success */
-int parse_command_args(char **args, size_t *nargs, size_t maxargs)
-{
-	size_t args_sz = 0;
-	while (1) {
-		if (args_sz == 0 && current_token.type == TOK_NEWLINE)
-			skip_empty_inputs_short();
-		if (current_token.type != TOK_ARG)
-			break;
-		if (args_sz >= maxargs) {
-			info(stderr, "too long command");
-			info(stderr, "info: max number of arguments in one command = %d", maxargs);
-			return 1;
-		}
-		args[args_sz++] = strdup(current_token.name);
-		get_token();
-	}
+        if ((command_name == NULL) || !strcmp (command_name, "exit")) // выход
+            break;
 
-	if (current_token.type == TOK_TOO_LONG_ARG) {
-		info(stderr, "too long argument: %s...", current_token.name);
-		info(stderr, "info: max argument lenght = %d", MAX_TOKEN);
-		return 1;
-	}
-	if (args_sz == 0 && current_token.type == TOK_PIPE) {
-		info(stderr, "unexpected '|' symbol");
-		return 1;
-	}
-	assert(!(args_sz == 0 && current_token.type != TOK_EOF));
+        int number_of_comnd = 0;
+        commands[number_of_comnd] = strtok (command_name, "|");
+         while (commands[++number_of_comnd] = strtok (NULL, "|"));
+        int pass_pipe = -1;
+        int pid;
+        int pipefd[2];
+        for (int i = 0; i < number_of_comnd; ++i) {
+            if (pipe (pipefd) == -1) {
+                printf ("Pipe error\n"); //выводим ошибку пайпа
+                break;
+            }
 
-	*nargs = args_sz;
-	return 0; // success
-}
+            pid = fork ();
+            if (pid == -1) {
+                printf ("Fork error\n"); //выводим ошибку форка
+                break;
+            }
 
-token_type_t process_next_command()
-{
-	int input_fd = STDIN_FILENO;
-	int output_fd = -1;
+            if (pid) {
+                close (pipefd[1]);
+                if (pass_pipe != -1)
+                    CLOSE (pass_pipe);
+                pass_pipe = pipefd[0];
+            }
+            else {
+                if (pass_pipe != -1)
+                    if (dup2 (pass_pipe, 0) == -1) {
+                        perror ("error in copying from std");
+                        return -1;
+                    }
 
-	char *args[MAX_ARGS + 1]; // +1 - for ending NULL
-	size_t args_sz = 0;
+                if (i < (number_of_comnd - 1))
+                    if (dup2 (pipefd[1], 1) == -1) {
+                        perror (" error in copying to stdout");
+                        return -1;
+                    }
 
-	skip_empty_inputs();
+                close (pipefd[0]);
+                close (pipefd[1]);
+                if (pass_pipe != -1)
+                    CLOSE (pass_pipe); //закрываем пайп
 
-	while (1) {
-		if (parse_command_args(args, &args_sz, MAX_ARGS) != 0) {
-			if (current_token.type == TOK_EOF)
-				return TOK_EOF;
-			rewind(stdin);
-			skip_empty_inputs();
-			continue;
-		}
-		args[args_sz] = NULL;
-		execute(args[0], args, input_fd,
-			(current_token.type == TOK_PIPE) ? &output_fd : NULL);
-		if (input_fd != STDIN_FILENO)
-			close(input_fd);
-		if (current_token.type == TOK_PIPE) {
-			input_fd = output_fd;
-			get_token(); // skip TOK_PIPE
-		} else
-			break;
-	}
-	while (wait(NULL) != -1)
-		;
-		
-	return current_token.type;
-}
+                int num_of_args = 0;
+                cmd[num_of_args] = strtok (commands[i], " ");
+                while (cmd[++num_of_args] = strtok (NULL, " "));
 
-void exit_shell(int unused)
-{
-	printf("\n\n%s\n", leaving_msg);
-	exit(EXIT_SUCCESS);
-}
+                execvp (cmd[0], cmd);
+                perror (cmd[0]);
+                return -1;
+            }
+        }
 
-int main(int argc, char *argv[])
-{
-	PROGRAM_NAME = error_prompt;
-	signal(SIGINT, exit_shell);
+        close (pass_pipe); //закрываем пайп
 
-	printf("%s\n\n", greeting_msg);
-	while (process_next_command() != TOK_EOF)
-		;
-	exit_shell(0);
-	return 0;
+        for (int i = 0; i < number_of_comnd; i++)
+            wait (NULL);
+    }
+
+    return 0;
 }
